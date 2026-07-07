@@ -118,6 +118,14 @@ That is a real run of the script in this folder.
   intermediate states (e.g. typing a partial word). Caught `ValueError` at
   the GUI layer and show it as a small inline message instead of leaving
   the output box stale or crashing the app mid-keystroke.
+- **Diagramming the shared playback source.** The playback panel is one
+  canvas shared by two tabs, and `_current_tab_state()` picks which tab's
+  Morse content to animate with a fixed priority (Text-to-Morse tab's output
+  first, Morse-to-Text tab's input only as a fallback) rather than "whichever
+  was typed most recently." A first draft of the architecture diagram implied
+  the two tabs fed the canvas symmetrically, which doesn't match the code;
+  redrew it as an explicit priority check so the diagram doesn't overstate
+  how the source is chosen.
 
 ## What I learned
 
