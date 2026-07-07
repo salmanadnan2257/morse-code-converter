@@ -15,6 +15,13 @@ Run with:
 import tkinter as tk
 from tkinter import ttk
 
+from morse_audio import (
+    UNIT_MS,
+    build_symbol_tones,
+    build_timing_sequence,
+    detect_playback_backend,
+    play_wav_async,
+)
 from morse_converter import morse_to_text, text_to_morse
 
 BG = "#1e1e2e"
@@ -27,9 +34,7 @@ DOT_ON = "#7aa2f7"
 DASH_ON = "#f7768e"
 SYMBOL_OFF = "#44475a"
 
-PLAYBACK_DOT_MS = 220
-PLAYBACK_DASH_MS = 420
-PLAYBACK_GAP_MS = 160
+NO_AUDIO_MESSAGE = "No audio output available on this system, showing visual playback only."
 
 
 class MorseApp:
@@ -41,6 +46,15 @@ class MorseApp:
         self.root.minsize(620, 480)
 
         self._playback_job = None
+
+        # Audio setup: detect what's actually available on this machine at
+        # runtime (never assumed) and generate the two tones we'll reuse for
+        # every dot and dash, if a playback backend exists at all.
+        self._audio_backend = detect_playback_backend()
+        if self._audio_backend is not None:
+            self._dot_tone_path, self._dash_tone_path = build_symbol_tones()
+        else:
+            self._dot_tone_path = self._dash_tone_path = None
 
         self._build_style()
         self._build_layout()
@@ -85,6 +99,18 @@ class MorseApp:
         )
         style.configure(
             "Error.TLabel", background=BG, foreground=ERROR_FG, font=("DejaVu Sans", 9)
+        )
+        style.configure(
+            "PanelMuted.TLabel",
+            background=PANEL_BG,
+            foreground=MUTED_FG,
+            font=("DejaVu Sans", 9),
+        )
+        style.configure(
+            "PanelWarning.TLabel",
+            background=PANEL_BG,
+            foreground=ERROR_FG,
+            font=("DejaVu Sans", 9),
         )
 
     # -- layout --------------------------------------------------------
@@ -149,8 +175,19 @@ class MorseApp:
         self.playback_canvas = tk.Canvas(
             playback_frame, height=70, bg=PANEL_BG, highlightthickness=0
         )
-        self.playback_canvas.pack(fill="x", padx=12, pady=(0, 12))
+        self.playback_canvas.pack(fill="x", padx=12, pady=(0, 4))
         self._symbol_ids = []
+
+        if self._audio_backend is not None:
+            status_text = f"Audio backend: {self._audio_backend}"
+            status_style = "PanelMuted.TLabel"
+        else:
+            status_text = NO_AUDIO_MESSAGE
+            status_style = "PanelWarning.TLabel"
+        self.audio_status_label = ttk.Label(
+            playback_frame, text=status_text, style=status_style
+        )
+        self.audio_status_label.pack(anchor="w", padx=12, pady=(0, 10))
 
     def _build_conversion_tab(
         self, notebook, input_label, output_label, convert_fn, playback_source
@@ -294,43 +331,80 @@ class MorseApp:
         if not morse:
             return
 
-        symbols = [c for c in morse if c in ".-"]
-        self._render_symbols(symbols)
+        events = build_timing_sequence(morse)
+        if not events:
+            return
+
+        self._playback_events = self._render_events(events)
         self._play_index = 0
-        self._playback_symbols = symbols
         self._advance_playback()
 
-    def _render_symbols(self, symbols) -> None:
+    def _render_events(self, events) -> list:
+        # Lay out one box per dot/dash on the canvas, in order, and pair
+        # each with its real millisecond duration (dot = 1 unit, dash = 3
+        # units). Gaps get no box but still occupy their real duration
+        # (1 unit within a letter, 3 between letters, 7 between words), and
+        # widen the horizontal spacing so the eye can see word/letter
+        # boundaries too.
         self.playback_canvas.delete("all")
         x = 12
         y = 35
-        self._symbol_boxes = []
-        for symbol in symbols:
-            width = 14 if symbol == "." else 34
-            box = self.playback_canvas.create_oval(
-                x, y - 8, x + width, y + 8, fill=SYMBOL_OFF, outline=""
-            ) if symbol == "." else self.playback_canvas.create_rectangle(
-                x, y - 8, x + width, y + 8, fill=SYMBOL_OFF, outline=""
-            )
-            self._symbol_boxes.append((box, symbol))
-            x += width + 10
+        prepared = []
+        for kind, units in events:
+            duration_ms = units * UNIT_MS
+            if kind == "gap":
+                prepared.append({"kind": "gap", "duration_ms": duration_ms, "box": None})
+                x += 6 + units * 4
+                continue
+            width = 14 if kind == "dot" else 34
+            if kind == "dot":
+                box = self.playback_canvas.create_oval(
+                    x, y - 8, x + width, y + 8, fill=SYMBOL_OFF, outline=""
+                )
+            else:
+                box = self.playback_canvas.create_rectangle(
+                    x, y - 8, x + width, y + 8, fill=SYMBOL_OFF, outline=""
+                )
+            prepared.append({"kind": kind, "duration_ms": duration_ms, "box": box})
+            x += width
+        return prepared
 
     def _advance_playback(self) -> None:
-        if self._play_index >= len(self._playback_symbols):
+        if self._play_index >= len(self._playback_events):
             self._playback_job = None
             return
 
-        box, symbol = self._symbol_boxes[self._play_index]
-        color = DOT_ON if symbol == "." else DASH_ON
-        duration = PLAYBACK_DOT_MS if symbol == "." else PLAYBACK_DASH_MS
+        event = self._playback_events[self._play_index]
+
+        if event["kind"] == "gap":
+            def next_event():
+                self._play_index += 1
+                self._advance_playback()
+
+            self._playback_job = self.root.after(event["duration_ms"], next_event)
+            return
+
+        box = event["box"]
+        color = DOT_ON if event["kind"] == "dot" else DASH_ON
         self.playback_canvas.itemconfigure(box, fill=color)
+
+        if self._audio_backend is not None:
+            tone_path = (
+                self._dot_tone_path if event["kind"] == "dot" else self._dash_tone_path
+            )
+            try:
+                play_wav_async(tone_path, self._audio_backend)
+            except OSError:
+                # Never let a playback failure break the visual playback;
+                # the flash is still an honest representation on its own.
+                pass
 
         def turn_off():
             self.playback_canvas.itemconfigure(box, fill=SYMBOL_OFF)
             self._play_index += 1
-            self._playback_job = self.root.after(PLAYBACK_GAP_MS, self._advance_playback)
+            self._advance_playback()
 
-        self._playback_job = self.root.after(duration, turn_off)
+        self._playback_job = self.root.after(event["duration_ms"], turn_off)
 
 
 def main() -> None:
