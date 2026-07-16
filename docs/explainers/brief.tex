@@ -1,0 +1,317 @@
+% explainer-source-hash: 378da11993b49d26f51eace8aae858845ac55c6ff180b36302677526a7ffcf01
+% explainer-source-commit: b46124dd2204fce0b088f79ad7cd690afbbcf024
+% explainer-generated: 2026-07-16
+% Regenerate with /explain-all (see WIRING.md). Do not edit this stamp by hand:
+% it is how the toolchain knows whether this document still matches the code.
+\documentclass[11pt,a4paper]{article}
+\input{preamble}
+\begin{document}
+
+\begin{center}
+{\LARGE\bfseries\color{inkblue} Morse Code Converter\par}
+\vspace{4pt}
+{\large\color{accent} The Brief\par}
+\vspace{6pt}
+{\small\itshape A high-level but complete account of what the project is, how it is
+built, and where it is weak. Terms are defined in the glossary on the last page.}
+\end{center}
+\vspace{6pt}
+\hrule
+\vspace{10pt}
+
+% =====================================================================
+\section{The project in one paragraph}
+
+A desktop application in Python that converts text to International Morse Code and
+back, live, as you type, in a two-tab window. It can play the current Morse code
+aloud as real 700~Hz beeps while flashing each dot and dash on screen in exact time
+with the sound. It is three Python files, roughly 600 lines including comments, and
+it has \textbf{no third-party dependencies}: the interface, the sound generation and
+the playback all run on Python's standard library alone. There is no database, no
+network access, and no configuration.
+
+It began as a practice exercise in dictionary lookups and grew into an application.
+That history is visible in the code, and mostly in a good way.
+
+% =====================================================================
+\section{Architecture}
+
+The organising decision is that \textbf{only one of the three files knows a screen
+exists}. The conversion logic and the audio logic can each be imported and used with
+no window ever opening, which is what makes the logic testable and let the audio be
+rewritten without touching the converter.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=10mm]
+  \node[box] (gui) {\file{gui.py}\\[2pt] \scriptsize tkinter window: two tabs, live text\\ \scriptsize boxes, playback canvas, buttons};
+  \node[box, below left=16mm and 4mm of gui] (conv) {\file{morse\_converter.py}\\[2pt] \scriptsize 57-entry alphabet table\\ \scriptsize \code{text\_to\_morse} / \code{morse\_to\_text}\\ \scriptsize \textit{imports nothing at all}};
+  \node[box, below right=16mm and 4mm of gui] (audio) {\file{morse\_audio.py}\\[2pt] \scriptsize standard Morse timing\\ \scriptsize sine-wave WAV generation\\ \scriptsize runtime backend detection};
+  \node[extbox, below=12mm of audio] (os) {system audio player\\[2pt] \scriptsize \code{aplay}, \code{paplay},\\ \scriptsize \code{afplay}, \code{ffplay},\\ \scriptsize or \code{winsound}};
+  \draw[flow] (gui) -- node[lbl,left] {imports} (conv);
+  \draw[flow] (gui) -- node[lbl,right] {imports} (audio);
+  \draw[dflow] (audio) -- node[lbl,right] {spawns} (os);
+\end{tikzpicture}
+\caption{Module dependencies. Nothing points upward, and the two lower modules do
+not import each other in any real code path.}
+\end{figure}
+
+\subsection{\file{morse\_converter.py}: the alphabet}
+
+A hardcoded dictionary maps 57 characters (26 letters, 10 digits, the space, and 20
+punctuation marks) to their Morse patterns. A one-line dictionary comprehension
+inverts that same table to build the decoder, so there is exactly one place to edit a
+mapping. An excerpt, exactly as it appears in the source (the Deep Dive prints all 57
+entries):
+
+\begin{lstlisting}[language=Python]
+MORSE_CODE = {
+    "A": ".-", "B": "-...", "C": "-.-.", "D": "-..", "E": ".",
+    # ... through N ...
+    "O": "---", "P": ".--.", "Q": "--.-", "R": ".-.", "S": "...",
+    # ... through Z, then the ten digits ...
+    "0": "-----", "1": ".----", "2": "..---", "3": "...--",
+    " ": "/",
+    "!": "-.-.--", "?": "..--..", ".": ".-.-.-", ",": "--..--",
+    # ... twenty punctuation marks in total, including "-": "-....-" ...
+}
+\end{lstlisting}
+
+So \code{text\_to\_morse("SOS")} looks up S, O and S in turn and returns
+\code{... --- ...}, the canonical Morse message: three dots, three dashes, three
+dots.
+
+\code{text\_to\_morse} uppercases the input (this is the entire ``case-insensitive''
+feature) and looks up each character, raising a \code{ValueError} that names the
+offending character rather than letting a low-level \code{KeyError} escape.
+\code{morse\_to\_text} reverses the process. Running the file directly still offers
+the original one-line command-line prompt, though it can only encode, not decode.
+
+\begin{keyidea}{The row that does the quiet work}
+The space character is treated as an ordinary table entry whose Morse ``pattern'' is
+a forward slash (\code{" ": "/"}). Because \code{text\_to\_morse} joins per-character
+codes with single spaces, every word boundary in the output is literally the three
+characters \code{"\ /\ "}. That regularity is what makes decoding, and the playback
+timing, straightforward to parse.
+\end{keyidea}
+
+\subsection{\file{morse\_audio.py}: real sound from nothing}
+
+Morse code is a pattern of \emph{durations}, not just of symbols, and the standard
+fixes them all as multiples of one base unit (80~ms here):
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+dot & 1 unit of tone & gap between letters: 3 units of silence \\
+dash & 3 units of tone & gap between words: 7 units of silence \\
+gap inside a letter & 1 unit of silence & \\
+\bottomrule
+\end{tabular}
+\caption{The standard ratios, each a named constant in the source. Silence carries
+information: without three distinct gap lengths a listener cannot tell where one
+letter ends and the next begins.}
+\end{table}
+
+\code{build\_timing\_sequence} turns a Morse string into an explicit ordered list of
+\code{(kind, units)} events, emitting gaps only \emph{between} elements so a message
+never ends in trailing silence.
+
+Sound itself is generated from first principles: \code{math.sin} produces a sine
+wave, \code{struct} packs the samples into raw bytes, and the standard library's
+\code{wave} module writes them to a WAV file. This is the whole reason the
+dependency list is empty. The project's own README records that it originally
+shipped visual-only playback because there ``seemed to be no dependency-free way to
+make a sound'', and that this was simply wrong.
+
+Playing the file is the harder half, because Python has no cross-platform way to
+reach a speaker. \code{detect\_playback\_backend} therefore \textbf{asks the machine
+rather than assuming}: it tries \code{winsound} on Windows, then checks for
+\code{aplay}, \code{paplay}, \code{afplay} and \code{ffplay} with \code{shutil.which}
+in that order, and treats ``nothing found'' as a legitimate answer. On this machine
+it returns \code{aplay}. If it returns nothing, the app says so plainly in the
+playback panel and keeps the visual flash working alone.
+
+Tones are launched with \code{subprocess.Popen}, which starts the player and returns
+immediately rather than waiting for it to finish. This is load-bearing: if playback
+blocked for the 240~ms of a dash, the window would freeze and the picture would fall
+behind the sound.
+
+\subsection{\file{gui.py}: the window}
+
+A hand-styled dark tkinter interface. One factory function builds both tabs, handed a
+different conversion function each time, so identical machinery serves both
+directions. Each input box re-converts its entire contents on every \code{<KeyRelease>}
+event, which is why there is no submit button; conversion therefore runs constantly on
+invalid half-typed input, and a caught \code{ValueError} becomes a small inline
+message instead of a crash. Audio is detected and the two tone files generated at
+startup, before anything is drawn, so no delay is audible during playback.
+
+% =====================================================================
+\section{The idea worth taking away}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=9mm]
+  \node[box] (morse) {the current Morse string};
+  \node[box, below=of morse] (seq) {\code{build\_timing\_sequence()}\\[2pt] \scriptsize called \textbf{once}};
+  \node[box, below=of seq] (list) {one list of \code{(kind, units)} events};
+  \node[box, below left=11mm and -4mm of list] (eye) {canvas flash\\[2pt] \scriptsize driven by \code{after()}};
+  \node[box, below right=11mm and -4mm of list] (ear) {tone playback\\[2pt] \scriptsize \code{Popen}, non-blocking};
+  \draw[flow] (morse) -- (seq);
+  \draw[flow] (seq) -- (list);
+  \draw[flow] (list) -- node[lbl,left] {the eyes} (eye);
+  \draw[flow] (list) -- node[lbl,right] {the ears} (ear);
+\end{tikzpicture}
+\caption{One timeline, two consumers.}
+\end{figure}
+
+\begin{keyidea}{Why this matters}
+The visual flash and the audio read from the \textbf{same} event list, so they cannot
+drift apart. The obvious alternative, hand-tuning a visual delay and an audio delay
+separately, is exactly what this project used to do, and the README records the
+result: a dot-to-dash ratio of roughly 1:1.9 instead of the correct 1:3, and one flat
+approximate gap where the standard requires three different ones. Deriving both
+outputs from a single source of truth is the fix, and it is the most transferable
+lesson in the project.
+\end{keyidea}
+
+Two other decisions are worth naming. \textbf{Detecting the audio backend at runtime}
+rather than inferring it from the operating system means a machine with no player
+installed gets an honest message instead of a crash or a silent no-op. And
+\textbf{keeping the conversion functions free of any tkinter import} is what allowed
+the entire audio subsystem to be rewritten, twice, without the converter changing.
+
+% =====================================================================
+\section{What I verified, and what I could not}
+
+Every behavioural claim below was checked by running the code, not read from the
+README:
+
+\begin{itemize}
+\item The 57-entry table inverts \textbf{losslessly}: no two characters share a Morse
+      pattern, so the decoder loses nothing. Notably, nothing in the code
+      \emph{checks} this; it is correct by the table's contents, not by any guard.
+\item The round-trip property \code{morse\_to\_text(text\_to\_morse(s)) == s.upper()}
+      held for every input tested: mixed case, digits, punctuation, a literal
+      \code{/}, leading and trailing spaces, doubled spaces, all-whitespace.
+\item \textbf{Timing is exact.} Rendering \code{"SOS"} gave 27 units, and the
+      resulting WAV measured 95{,}256 frames at 44{,}100~Hz, precisely 2160~ms,
+      matching $27 \times 80$~ms computed by hand from the standard ratios.
+      \code{"SOS SOS"} gave 61 units and 215{,}208 frames, exactly 4880~ms, so the
+      7-unit word gap is accounted for to the sample.
+\item \code{detect\_playback\_backend()} returns \code{'aplay'} here, as documented.
+\end{itemize}
+
+I could not run the GUI (no display in this session), so statements about on-screen
+behaviour are read from the code. The \code{winsound}, \code{afplay} and
+\code{paplay} paths need Windows, macOS and PulseAudio respectively and were not
+exercised; the README states this limitation itself.
+
+% =====================================================================
+\section{Honest assessment}
+
+The good is real. The module separation is genuine rather than nominal, the single
+event list is the right answer to a problem the project first got wrong, the runtime
+backend detection with a working fallback is more care than a practice project
+usually receives, and generating correct audio from \code{math.sin} and \code{wave}
+is a well-earned way to keep the dependency list empty. The README is unusually
+candid about the project's own missteps.
+
+The weaknesses, in order of how much they matter:
+
+\begin{honest}{No automated tests}
+The project's correctness lives almost entirely in a 57-entry table, and there is no
+test file. Every claim in the section above had to be re-established by hand. A
+silently wrong table entry is exactly the defect that manual spot-checks miss and a
+test would catch instantly. The README names this first among what it would do
+differently, which is the right instinct.
+\end{honest}
+
+\begin{honest}{Play does not respect the tab you are looking at}
+\code{\_current\_tab\_state()} is misnamed twice over: it returns a string, not a tab
+state, and it never asks which tab is selected. It reads the Text-to-Morse tab's
+output first and only falls back to the other tab. So typing in the first tab,
+switching to the second, typing there and pressing Play replays the \emph{first}
+tab's content. The README acknowledges the fixed priority honestly, but the behaviour
+is still surprising.
+\end{honest}
+
+\begin{honest}{Two contracts for the same malformed input}
+\code{morse\_to\_text} raises a \code{ValueError} naming a bad symbol, while
+\code{build\_timing\_sequence} silently discards anything that is not a dot or dash.
+I confirmed that \code{build\_timing\_sequence(".- XYZ -...")} drops \code{XYZ}
+without complaint yet still emits the gaps around it. The GUI masks this, but the two
+halves of the library genuinely disagree.
+\end{honest}
+
+\begin{honest}{Redundant decoding logic, with a rationale that does not hold}
+\code{morse\_to\_text} handles word gaps twice: it splits the input on \code{" / "},
+and \code{"/"} is \emph{also} an ordinary decodable table entry meaning space. A
+naive one-line decoder that never splits on \code{" / "} produced identical output on
+every input I tested. The README defends the split by arguing that ``splitting
+naively on \code{/} alone would have left stray spaces'', but the alternative it
+overlooks is not splitting on the slash at all, and simply decoding it like any other
+symbol. Not a bug; redundant complexity with a stale justification.
+\end{honest}
+
+Smaller items: \code{\_safe\_text\_to\_morse} and \code{\_safe\_morse\_to\_text} are
+pure pass-through wrappers whose \code{\_safe\_} prefix promises a safety they do not
+provide (the real error handling is elsewhere). The multi-line input boxes reject
+newlines, since \code{"\textbackslash n"} is not in the table, so pressing Enter
+blanks the output with an inline error; it is handled gracefully but the widget
+invites input the alphabet cannot represent. \code{render\_morse\_to\_wav} is unused
+by the application and is really a development instrument. And because tone processes
+are never collected, each finished player leaves a short-lived zombie process until
+the app exits.
+
+None of these is a crash, a security issue, or a wrong answer. They are the ordinary
+residue of a script that grew into an application, and the distance between this
+code and its documentation is small.
+
+% =====================================================================
+\section*{Glossary}
+\addcontentsline{toc}{section}{Glossary}
+
+\begin{description}[leftmargin=0pt, style=nextline, itemsep=3pt]
+\item[Morse code] Representing letters and digits as sequences of short signals
+  (dots) and long signals (dashes), designed for telegraph wires where the only
+  controllable thing was whether current flowed. ``International'' (ITU) Morse is the
+  modern standardised form.
+\item[Dictionary (\code{dict})] A container mapping keys to values, with instant
+  lookup by key regardless of size, because it uses a hash table internally rather
+  than scanning entries.
+\item[Module] A single Python file. One module can \emph{import} another to use what
+  is defined inside it.
+\item[GUI / tkinter / widget] A graphical user interface is the visible, clickable
+  part of a program. \emph{tkinter} is Python's built-in GUI toolkit; a \emph{widget}
+  is any element within it (window, button, text box, canvas).
+\item[Event loop] The endless loop at a GUI's heart that waits for something to
+  happen (a key, a click, a timer) and calls the function registered for it.
+  \code{root.after(ms, fn)} asks it to call \code{fn} later without blocking.
+\item[Callback] A function handed to something else to be called later, when an event
+  occurs.
+\item[Exception / raising / \code{ValueError}] When a function cannot do its job it
+  \emph{raises} an exception, stopping immediately and handing an error up to its
+  caller, who may \emph{catch} it. \code{ValueError} conventionally means ``this
+  value is unusable''.
+\item[PCM / sample rate] Digital audio stores sound by measuring air pressure
+  thousands of times per second. Each measurement is a \emph{sample}; the rate here
+  is 44{,}100 per second, the audio-CD rate. The raw list of numbers is \emph{PCM}.
+\item[Sine wave / frequency / hertz] A pure tone is a value swinging smoothly up and
+  down at a fixed rate. That rate, in hertz, is the frequency, perceived as pitch.
+  This project uses 700~Hz.
+\item[WAV / the \code{wave} module] A WAV file is raw PCM samples with a small header
+  declaring sample rate, channel count and sample size. Python's standard library
+  writes it, which is why no audio dependency is needed.
+\item[Process / \code{subprocess.Popen} / blocking] A process is a running program.
+  \code{Popen} launches one and returns immediately; \code{run} and \code{wait}
+  instead \emph{block}, freezing the caller until it finishes.
+\item[\code{shutil.which}] Answers ``would this command actually run on this machine,
+  and where does it live?'' by searching \code{PATH}. Returns \code{None} if not.
+\item[Standard library] The code that ships with Python itself, needing no
+  installation. Everything this project uses comes from it.
+\end{description}
+
+\end{document}
